@@ -208,7 +208,7 @@ export default function HealthTracker() {
     document.body.appendChild(link);
     link.click();
     link.remove();
-    URL.revokeObjectURL(url);
+    setTimeout(() => URL.revokeObjectURL(url), 1000);
   };
 
   const downloadPdf = () => {
@@ -249,8 +249,19 @@ export default function HealthTracker() {
           </script>
         </body>
       </html>`;
-    const report = window.open("", "_blank", "noopener,noreferrer");
-    if (!report) return;
+    const report = window.open("", "_blank");
+    if (!report) {
+      const blob = new Blob([html], { type: "text/html;charset=utf-8" });
+      const url = URL.createObjectURL(blob);
+      const link = document.createElement("a");
+      link.href = url;
+      link.download = exportFilename("html");
+      document.body.appendChild(link);
+      link.click();
+      link.remove();
+      setTimeout(() => URL.revokeObjectURL(url), 1000);
+      return;
+    }
     report.document.open();
     report.document.write(html);
     report.document.close();
