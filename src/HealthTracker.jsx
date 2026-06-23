@@ -17,6 +17,32 @@ const METRICS = [
   { key: "mood", label: "Mood", unit: "/5", color: "#ec4899", barColor: "#ec4899", fixedMin: 0, fixedMax: 5 },
 ];
 
+const EXPORT_COLUMNS = [
+  { key: "date", label: "Date", value: (e) => fmtFull(e.date) },
+  { key: "weight", label: "Weight (lbs)", value: (e) => e.weight },
+  { key: "bpAm", label: "AM BP", value: (e) => formatBp(e.bpAmSys, e.bpAmDia) },
+  { key: "bpPm", label: "PM BP", value: (e) => formatBp(e.bpPmSys, e.bpPmDia) },
+  { key: "diet", label: "Diet (/5)", value: (e) => e.diet },
+  { key: "fasting", label: "Fasting (hrs)", value: (e) => e.fasting },
+  { key: "smokes", label: "Smokes/day", value: (e) => e.smokes },
+  { key: "isometric", label: "Isometric", value: (e) => e.isometric ? "Yes" : "No" },
+  { key: "sleep", label: "Sleep (hrs)", value: (e) => e.sleep },
+  { key: "mood", label: "Mood (/5)", value: (e) => e.mood },
+];
+
+function formatBp(sys, dia) {
+  return sys && dia ? `${sys}/${dia}` : "";
+}
+
+function escapeHtml(value) {
+  return String(value ?? "").replace(/[&<>"']/g, (ch) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[ch]));
+}
+
+function csvCell(value) {
+  const text = String(value ?? "");
+  return /[",\n]/.test(text) ? `"${text.replace(/"/g, '""')}"` : text;
+}
+
 function getMetricValue(entry, key) {
   const num = (v) => { const n = parseFloat(v); return isNaN(n) ? 0 : n; };
   if (key === "bpSys") return num(entry.bpAmSys) || num(entry.bpPmSys);
@@ -58,6 +84,7 @@ export default function HealthTracker() {
   const toggleBarMetric = (key) => setActiveBarMetrics(prev => prev.includes(key) ? (prev.length > 1 ? prev.filter(k => k !== key) : prev) : [...prev, key]);
   const [filterMode, setFilterMode] = useState("all");
   const [filterValue, setFilterValue] = useState("");
+  const [exportColumns, setExportColumns] = useState(EXPORT_COLUMNS.map(c => c.key));
 
   useEffect(() => {
     const unsubscribe = subscribeAuth(setAuthInfo);
@@ -144,7 +171,90 @@ export default function HealthTracker() {
 
   const f = (key, val) => setForm(p => ({ ...p, [key]: val }));
   const toggleMetric = (key) => setActiveMetrics(prev => prev.includes(key) ? (prev.length > 1 ? prev.filter(k => k !== key) : prev) : [...prev, key]);
+  const toggleExportColumn = (key) => setExportColumns(prev => prev.includes(key) ? (prev.length > 1 ? prev.filter(k => k !== key) : prev) : [...prev, key]);
   const avg = (arr, fn) => { const vals = arr.map(fn).filter(v => v > 0); return vals.length ? vals.reduce((a, b) => a + b, 0) / vals.length : 0; };
+
+  const selectedExportColumns = useMemo(
+    () => EXPORT_COLUMNS.filter(c => exportColumns.includes(c.key)),
+    [exportColumns]
+  );
+
+  const exportRows = useMemo(
+    () => [...filtered].sort((a, b) => a.date.localeCompare(b.date)),
+    [filtered]
+  );
+
+  const exportLabel = useMemo(() => {
+    if (filterMode === "all" || !filterValue) return "All Entries";
+    if (filterMode === "year") return filterValue;
+    if (filterMode === "month") {
+      const [y, m] = filterValue.split("-");
+      return `${["Jan","Feb","Mar","Apr","May","Jun","Jul","Aug","Sep","Oct","Nov","Dec"][+m - 1]} ${y}`;
+    }
+    return fmtFull(filterValue);
+  }, [filterMode, filterValue]);
+
+  const exportFilename = (ext) => `health-tracker-${filterValue || filterMode}-${today()}.${ext}`;
+
+  const downloadExcel = () => {
+    if (!exportRows.length) return;
+    const header = selectedExportColumns.map(c => csvCell(c.label)).join(",");
+    const body = exportRows.map(row => selectedExportColumns.map(c => csvCell(c.value(row))).join(",")).join("\n");
+    const blob = new Blob([`\uFEFF${header}\n${body}`], { type: "text/csv;charset=utf-8" });
+    const url = URL.createObjectURL(blob);
+    const link = document.createElement("a");
+    link.href = url;
+    link.download = exportFilename("csv");
+    document.body.appendChild(link);
+    link.click();
+    link.remove();
+    URL.revokeObjectURL(url);
+  };
+
+  const downloadPdf = () => {
+    if (!exportRows.length) return;
+    const columns = selectedExportColumns;
+    const rowsHtml = exportRows.map(row => (
+      `<tr>${columns.map(c => `<td>${escapeHtml(c.value(row))}</td>`).join("")}</tr>`
+    )).join("");
+    const html = `<!doctype html>
+      <html>
+        <head>
+          <meta charset="utf-8" />
+          <title>Health Tracker ${escapeHtml(exportLabel)}</title>
+          <style>
+            @page { size: landscape; margin: 0.4in; }
+            * { box-sizing: border-box; }
+            body { font-family: Arial, sans-serif; color: #111; margin: 0; }
+            h1 { font-size: 20px; margin: 0 0 4px; }
+            .meta { color: #555; font-size: 11px; margin-bottom: 14px; }
+            table { width: 100%; border-collapse: collapse; table-layout: fixed; font-size: 10px; }
+            th { background: #111; color: #fff; text-align: left; padding: 7px 6px; border: 1px solid #111; }
+            td { padding: 6px; border: 1px solid #d8d8d8; vertical-align: top; word-break: break-word; }
+            tr:nth-child(even) td { background: #f7f7f7; }
+          </style>
+        </head>
+        <body>
+          <h1>Health Tracker</h1>
+          <div class="meta">${escapeHtml(exportLabel)} · ${exportRows.length} entries · Generated ${escapeHtml(fmtFull(today()))}</div>
+          <table>
+            <thead><tr>${columns.map(c => `<th>${escapeHtml(c.label)}</th>`).join("")}</tr></thead>
+            <tbody>${rowsHtml}</tbody>
+          </table>
+          <script>
+            window.addEventListener("load", () => {
+              window.focus();
+              window.print();
+            });
+          </script>
+        </body>
+      </html>`;
+    const report = window.open("", "_blank", "noopener,noreferrer");
+    if (!report) return;
+    report.document.open();
+    report.document.write(html);
+    report.document.close();
+  };
 
   return (
     <div style={{ fontFamily: "'Inter', -apple-system, BlinkMacSystemFont, sans-serif", background: "#f8f8fa", minHeight: "100vh", color: "#111" }}>
@@ -306,6 +416,15 @@ export default function HealthTracker() {
         {tab === "history" && (
           <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
             <FilterBar {...{ filterMode, setFilterMode, filterValue, setFilterValue, availableYears, availableMonths }} />
+            <ExportPanel
+              columns={EXPORT_COLUMNS}
+              selectedColumns={exportColumns}
+              onToggleColumn={toggleExportColumn}
+              onDownloadPdf={downloadPdf}
+              onDownloadExcel={downloadExcel}
+              rowCount={exportRows.length}
+              label={exportLabel}
+            />
             {filtered.length === 0 ? <Empty text="No entries for this period" /> : filtered.map((e, i) => {
               const prev = i < filtered.length - 1 ? filtered[i + 1] : null;
               const diff = prev ? (parseFloat(prev.weight) - parseFloat(e.weight)).toFixed(1) : null;
@@ -623,8 +742,46 @@ function FilterBar({ filterMode, setFilterMode, filterValue, setFilterValue, ava
   );
 }
 
+function ExportPanel({ columns, selectedColumns, onToggleColumn, onDownloadPdf, onDownloadExcel, rowCount, label }) {
+  const canExport = rowCount > 0 && selectedColumns.length > 0;
+  return (
+    <Card>
+      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start", gap: 12, marginBottom: 10 }}>
+        <div>
+          <Label style={{ marginBottom: 4 }}>Export</Label>
+          <div style={{ fontSize: 11, color: "#999", fontWeight: 600 }}>{label} · {rowCount} rows</div>
+        </div>
+        <div style={{ display: "flex", gap: 6, flexShrink: 0 }}>
+          <button onClick={onDownloadPdf} disabled={!canExport} style={{ ...exportBtn, opacity: canExport ? 1 : 0.45 }}>PDF</button>
+          <button onClick={onDownloadExcel} disabled={!canExport} style={{ ...exportBtn, background: "#16a34a", opacity: canExport ? 1 : 0.45 }}>Excel</button>
+        </div>
+      </div>
+      <div style={{ display: "flex", gap: 5, flexWrap: "wrap" }}>
+        {columns.map(column => {
+          const active = selectedColumns.includes(column.key);
+          return (
+            <button key={column.key} onClick={() => onToggleColumn(column.key)} style={{
+              fontSize: 9,
+              fontWeight: 700,
+              padding: "5px 8px",
+              borderRadius: 9,
+              cursor: "pointer",
+              border: active ? "1.5px solid #111" : "1px solid #eee",
+              background: active ? "#111" : "#fff",
+              color: active ? "#fff" : "#aaa"
+            }}>
+              {column.label}
+            </button>
+          );
+        })}
+      </div>
+    </Card>
+  );
+}
+
 const selStyle = { fontSize: 12, padding: "5px 10px", borderRadius: 8, border: "1px solid #e5e5e5", background: "#fff", outline: "none", fontFamily: "Inter, sans-serif", color: "#555" };
 const authBtn = { border: "1px solid #e5e5e5", background: "#fff", color: "#555", borderRadius: 10, padding: "7px 10px", fontSize: 11, fontWeight: 700, cursor: "pointer", fontFamily: "Inter, sans-serif" };
+const exportBtn = { border: "none", background: "#111", color: "#fff", borderRadius: 10, padding: "7px 11px", fontSize: 11, fontWeight: 800, cursor: "pointer", fontFamily: "Inter, sans-serif" };
 const iconBtn = { background: "none", border: "none", cursor: "pointer", color: "#bbb", fontSize: 14, padding: "6px 8px", borderRadius: 6, lineHeight: 1 };
 
 function Card({ children }) { return <div style={{ background: "#fff", borderRadius: 14, padding: 16, border: "1px solid #f0f0f0", overflow: "hidden" }}>{children}</div>; }
