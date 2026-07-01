@@ -20,8 +20,8 @@ const METRICS = [
 const EXPORT_COLUMNS = [
   { key: "date", label: "Date", value: (e) => fmtFull(e.date) },
   { key: "weight", label: "Weight (lbs)", value: (e) => e.weight },
-  { key: "bpAm", label: "AM BP", value: (e) => formatBp(e.bpAmSys, e.bpAmDia) },
-  { key: "bpPm", label: "PM BP", value: (e) => formatBp(e.bpPmSys, e.bpPmDia) },
+  { key: "bpAm", label: "AM BP", value: (e) => formatBpList(getBpReadings(e, "am")) },
+  { key: "bpPm", label: "PM BP", value: (e) => formatBpList(getBpReadings(e, "pm")) },
   { key: "diet", label: "Diet (/5)", value: (e) => e.diet },
   { key: "fasting", label: "Fasting (hrs)", value: (e) => e.fasting },
   { key: "smokes", label: "Smokes/day", value: (e) => e.smokes },
@@ -32,6 +32,53 @@ const EXPORT_COLUMNS = [
 
 function formatBp(sys, dia) {
   return sys && dia ? `${sys}/${dia}` : "";
+}
+
+function getBpReadings(entry, period) {
+  const listKey = period === "am" ? "bpAmReadings" : "bpPmReadings";
+  const sysKey = period === "am" ? "bpAmSys" : "bpPmSys";
+  const diaKey = period === "am" ? "bpAmDia" : "bpPmDia";
+  const readings = Array.isArray(entry[listKey]) ? entry[listKey] : [];
+  const cleaned = readings
+    .map((reading, index) => ({
+      id: reading.id || `${period}-${index}`,
+      sys: reading.sys ?? "",
+      dia: reading.dia ?? ""
+    }))
+    .filter(reading => reading.sys || reading.dia);
+
+  if (cleaned.length) return cleaned;
+  if (entry[sysKey] || entry[diaKey]) return [{ id: `${period}-legacy`, sys: entry[sysKey] || "", dia: entry[diaKey] || "" }];
+  return [];
+}
+
+function formatBpList(readings) {
+  return readings.map(reading => formatBp(reading.sys, reading.dia)).filter(Boolean).join("\n");
+}
+
+function normalizeBpReadings(readings) {
+  const normalized = (Array.isArray(readings) ? readings : []).map((reading, index) => ({
+    id: reading.id || `${Date.now()}-${index}`,
+    sys: reading.sys ?? "",
+    dia: reading.dia ?? ""
+  }));
+  return normalized.length ? normalized : [{ id: Date.now(), sys: "", dia: "" }];
+}
+
+function normalizeEntry(entry) {
+  const bpAmReadings = normalizeBpReadings(getBpReadings(entry, "am"));
+  const bpPmReadings = normalizeBpReadings(getBpReadings(entry, "pm"));
+  const firstAm = bpAmReadings.find(reading => reading.sys || reading.dia) || {};
+  const firstPm = bpPmReadings.find(reading => reading.sys || reading.dia) || {};
+  return {
+    ...entry,
+    bpAmReadings,
+    bpPmReadings,
+    bpAmSys: firstAm.sys || "",
+    bpAmDia: firstAm.dia || "",
+    bpPmSys: firstPm.sys || "",
+    bpPmDia: firstPm.dia || ""
+  };
 }
 
 function escapeHtml(value) {
@@ -45,8 +92,10 @@ function csvCell(value) {
 
 function getMetricValue(entry, key) {
   const num = (v) => { const n = parseFloat(v); return isNaN(n) ? 0 : n; };
-  if (key === "bpSys") return num(entry.bpAmSys) || num(entry.bpPmSys);
-  if (key === "bpDia") return num(entry.bpAmDia) || num(entry.bpPmDia);
+  const firstAm = getBpReadings(entry, "am")[0];
+  const firstPm = getBpReadings(entry, "pm")[0];
+  if (key === "bpSys") return num(firstAm?.sys) || num(firstPm?.sys);
+  if (key === "bpDia") return num(firstAm?.dia) || num(firstPm?.dia);
   if (key === "diet") return entry.diet || 0;
   if (key === "fasting") return num(entry.fasting);
   if (key === "smokes") return num(entry.smokes);
@@ -77,7 +126,7 @@ export default function HealthTracker() {
   const [authBusy, setAuthBusy] = useState(false);
   const [authError, setAuthError] = useState("");
   const [editId, setEditId] = useState(null);
-  const blank = { date: today(), weight: "", bpAmSys: "", bpAmDia: "", bpPmSys: "", bpPmDia: "", diet: 3, fasting: "", smokes: "", isometric: false, sleep: "", mood: 3 };
+  const blank = normalizeEntry({ date: today(), weight: "", bpAmSys: "", bpAmDia: "", bpPmSys: "", bpPmDia: "", diet: 3, fasting: "", smokes: "", isometric: false, sleep: "", mood: 3 });
   const [form, setForm] = useState(blank);
   const [activeMetrics, setActiveMetrics] = useState(["weight"]);
   const [activeBarMetrics, setActiveBarMetrics] = useState(["weight"]);
@@ -90,10 +139,11 @@ export default function HealthTracker() {
     const unsubscribe = subscribeAuth(setAuthInfo);
     (async () => {
       try {
-        setEntries(await loadEntries(STORAGE_KEY));
+        const loaded = await loadEntries(STORAGE_KEY);
+        setEntries(loaded.map(normalizeEntry));
       } catch {
         const localValue = localStorage.getItem(STORAGE_KEY);
-        if (localValue) setEntries(JSON.parse(localValue));
+        if (localValue) setEntries(JSON.parse(localValue).map(normalizeEntry));
       }
     })();
     return unsubscribe;
@@ -106,7 +156,7 @@ export default function HealthTracker() {
     setAuthError("");
     try {
       const result = await signInWithGoogle(STORAGE_KEY);
-      if (result.user) setEntries(result.entries);
+      if (result.user) setEntries(result.entries.map(normalizeEntry));
     } catch (error) {
       setAuthError(error.code === "auth/popup-blocked" ? "Allow popups for this site, then tap Sign in again." : error.message || "Google sign-in failed.");
     } finally {
@@ -129,10 +179,10 @@ export default function HealthTracker() {
     if (!form.date || !form.weight) return;
     let updated;
     if (editId !== null) {
-      updated = entries.map(e => e.id === editId ? { ...form, id: editId } : e);
+      updated = entries.map(e => e.id === editId ? normalizeEntry({ ...form, id: editId }) : e);
       setEditId(null);
     } else {
-      const entry = { ...form, id: Date.now() };
+      const entry = normalizeEntry({ ...form, id: Date.now() });
       const idx = entries.findIndex(e => e.date === form.date);
       if (idx >= 0) { updated = [...entries]; updated[idx] = entry; }
       else { updated = [...entries, entry]; }
@@ -145,7 +195,7 @@ export default function HealthTracker() {
     setForm(blank);
   };
 
-  const startEdit = (e) => { setForm({ ...e }); setEditId(e.id); setTab("log"); window.scrollTo({ top: 0, behavior: "smooth" }); };
+  const startEdit = (e) => { setForm(normalizeEntry(e)); setEditId(e.id); setTab("log"); window.scrollTo({ top: 0, behavior: "smooth" }); };
   const cancelEdit = () => { setEditId(null); setForm(blank); };
   const del = async (id) => { const u = entries.filter(e => e.id !== id); setEntries(u); await persist(u); if (editId === id) cancelEdit(); };
 
@@ -170,6 +220,21 @@ export default function HealthTracker() {
   const chartData = useMemo(() => [...filtered].reverse().slice(-30), [filtered]);
 
   const f = (key, val) => setForm(p => ({ ...p, [key]: val }));
+  const addBpReading = (period) => {
+    const key = period === "am" ? "bpAmReadings" : "bpPmReadings";
+    setForm(p => ({ ...p, [key]: [...normalizeBpReadings(p[key]), { id: Date.now(), sys: "", dia: "" }] }));
+  };
+  const updateBpReading = (period, id, field, value) => {
+    const key = period === "am" ? "bpAmReadings" : "bpPmReadings";
+    setForm(p => ({ ...p, [key]: normalizeBpReadings(p[key]).map(reading => reading.id === id ? { ...reading, [field]: value } : reading) }));
+  };
+  const removeBpReading = (period, id) => {
+    const key = period === "am" ? "bpAmReadings" : "bpPmReadings";
+    setForm(p => {
+      const next = normalizeBpReadings(p[key]).filter(reading => reading.id !== id);
+      return { ...p, [key]: next.length ? next : [{ id: Date.now(), sys: "", dia: "" }] };
+    });
+  };
   const toggleMetric = (key) => setActiveMetrics(prev => prev.includes(key) ? (prev.length > 1 ? prev.filter(k => k !== key) : prev) : [...prev, key]);
   const toggleExportColumn = (key) => setExportColumns(prev => prev.includes(key) ? (prev.length > 1 ? prev.filter(k => k !== key) : prev) : [...prev, key]);
   const avg = (arr, fn) => { const vals = arr.map(fn).filter(v => v > 0); return vals.length ? vals.reduce((a, b) => a + b, 0) / vals.length : 0; };
@@ -230,7 +295,7 @@ export default function HealthTracker() {
             .meta { color: #555; font-size: 11px; margin-bottom: 14px; }
             table { width: 100%; border-collapse: collapse; table-layout: fixed; font-size: 10px; }
             th { background: #111; color: #fff; text-align: left; padding: 7px 6px; border: 1px solid #111; }
-            td { padding: 6px; border: 1px solid #d8d8d8; vertical-align: top; word-break: break-word; }
+            td { padding: 6px; border: 1px solid #d8d8d8; vertical-align: top; word-break: break-word; white-space: pre-line; }
             tr:nth-child(even) td { background: #f7f7f7; }
           </style>
         </head>
@@ -354,22 +419,22 @@ export default function HealthTracker() {
             <Card>
               <Label>Blood Pressure</Label>
               <div className="grid-2" style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 10 }}>
-                <div>
-                  <div style={{ fontSize: 10, color: "#bbb", marginBottom: 5, fontWeight: 600, letterSpacing: 0.5 }}>AM</div>
-                  <div style={{ display: "flex", gap: 5, alignItems: "center" }}>
-                    <Input type="number" placeholder="SYS" value={form.bpAmSys} onChange={e => f("bpAmSys", e.target.value)} mb={0} />
-                    <span style={{ color: "#ddd", fontSize: 16 }}>/</span>
-                    <Input type="number" placeholder="DIA" value={form.bpAmDia} onChange={e => f("bpAmDia", e.target.value)} mb={0} />
-                  </div>
-                </div>
-                <div>
-                  <div style={{ fontSize: 10, color: "#bbb", marginBottom: 5, fontWeight: 600, letterSpacing: 0.5 }}>PM</div>
-                  <div style={{ display: "flex", gap: 5, alignItems: "center" }}>
-                    <Input type="number" placeholder="SYS" value={form.bpPmSys} onChange={e => f("bpPmSys", e.target.value)} mb={0} />
-                    <span style={{ color: "#ddd", fontSize: 16 }}>/</span>
-                    <Input type="number" placeholder="DIA" value={form.bpPmDia} onChange={e => f("bpPmDia", e.target.value)} mb={0} />
-                  </div>
-                </div>
+                <BpReadingGroup
+                  label="AM"
+                  period="am"
+                  readings={normalizeBpReadings(form.bpAmReadings)}
+                  onAdd={addBpReading}
+                  onChange={updateBpReading}
+                  onRemove={removeBpReading}
+                />
+                <BpReadingGroup
+                  label="PM"
+                  period="pm"
+                  readings={normalizeBpReadings(form.bpPmReadings)}
+                  onAdd={addBpReading}
+                  onChange={updateBpReading}
+                  onRemove={removeBpReading}
+                />
               </div>
             </Card>
             <Card>
@@ -449,8 +514,8 @@ export default function HealthTracker() {
                       </div>
                       <div style={{ fontSize: 22, fontWeight: 700, letterSpacing: -0.5, marginBottom: 6 }}>{e.weight} <span style={{ fontSize: 12, color: "#ccc", fontWeight: 500 }}>lbs</span></div>
                       <div style={{ display: "flex", gap: 5, flexWrap: "wrap" }}>
-                        {e.bpAmSys && <Tag>AM {e.bpAmSys}/{e.bpAmDia}</Tag>}
-                        {e.bpPmSys && <Tag>PM {e.bpPmSys}/{e.bpPmDia}</Tag>}
+                        {getBpReadings(e, "am").map((reading, idx) => <Tag key={`am-${reading.id}-${idx}`}>AM {formatBp(reading.sys, reading.dia)}</Tag>)}
+                        {getBpReadings(e, "pm").map((reading, idx) => <Tag key={`pm-${reading.id}-${idx}`}>PM {formatBp(reading.sys, reading.dia)}</Tag>)}
                         {e.diet && <Tag>Diet {e.diet}/5</Tag>}
                         {e.fasting && <Tag>{e.fasting}h fast</Tag>}
                         {e.smokes && <Tag>{e.smokes} sm</Tag>}
@@ -716,7 +781,7 @@ export default function HealthTracker() {
                   <StatCard label="Low" value={Math.min(...filtered.map(e => parseFloat(e.weight) || 0))} unit="lbs" />
                   {totalLost && parseFloat(totalLost) > 0 && <StatCard label="Lost" value={totalLost} unit="lbs" accent />}
                   {(() => {
-                    const bp = filtered.filter(e => e.bpAmSys || e.bpPmSys);
+                    const bp = filtered.filter(e => getBpReadings(e, "am").length || getBpReadings(e, "pm").length);
                     if (!bp.length) return null;
                     return <StatCard label="Avg BP" value={`${Math.round(avg(bp, e => getMetricValue(e, "bpSys")))}/${Math.round(avg(bp, e => getMetricValue(e, "bpDia")))}`} unit="mmHg" />;
                   })()}
@@ -731,6 +796,34 @@ export default function HealthTracker() {
             )}
           </div>
         )}
+      </div>
+    </div>
+  );
+}
+
+function BpReadingGroup({ label, period, readings, onAdd, onChange, onRemove }) {
+  return (
+    <div>
+      <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 5 }}>
+        <div style={{ fontSize: 10, color: "#bbb", fontWeight: 600, letterSpacing: 0.5 }}>{label}</div>
+        <button onClick={() => onAdd(period)} title={`Add ${label} BP reading`} style={plusBtn}>+</button>
+      </div>
+      <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
+        {readings.map((reading, index) => (
+          <div key={reading.id} style={{ display: "flex", gap: 5, alignItems: "center" }}>
+            <Input type="number" placeholder="SYS" value={reading.sys} onChange={e => onChange(period, reading.id, "sys", e.target.value)} mb={0} />
+            <span style={{ color: "#ddd", fontSize: 16 }}>/</span>
+            <Input type="number" placeholder="DIA" value={reading.dia} onChange={e => onChange(period, reading.id, "dia", e.target.value)} mb={0} />
+            <button
+              onClick={() => onRemove(period, reading.id)}
+              disabled={readings.length === 1 && !reading.sys && !reading.dia}
+              title={`Remove ${label} BP reading`}
+              style={{ ...miniIconBtn, opacity: readings.length === 1 && !reading.sys && !reading.dia ? 0.25 : 1 }}
+            >
+              x
+            </button>
+          </div>
+        ))}
       </div>
     </div>
   );
@@ -793,6 +886,8 @@ function ExportPanel({ columns, selectedColumns, onToggleColumn, onDownloadPdf, 
 const selStyle = { fontSize: 12, padding: "5px 10px", borderRadius: 8, border: "1px solid #e5e5e5", background: "#fff", outline: "none", fontFamily: "Inter, sans-serif", color: "#555" };
 const authBtn = { border: "1px solid #e5e5e5", background: "#fff", color: "#555", borderRadius: 10, padding: "7px 10px", fontSize: 11, fontWeight: 700, cursor: "pointer", fontFamily: "Inter, sans-serif" };
 const exportBtn = { border: "none", background: "#111", color: "#fff", borderRadius: 10, padding: "7px 11px", fontSize: 11, fontWeight: 800, cursor: "pointer", fontFamily: "Inter, sans-serif" };
+const plusBtn = { border: "1px solid #e5e5e5", background: "#111", color: "#fff", borderRadius: 8, width: 24, height: 24, fontSize: 16, fontWeight: 800, cursor: "pointer", lineHeight: "20px", fontFamily: "Inter, sans-serif" };
+const miniIconBtn = { border: "none", background: "#f5f5f5", color: "#aaa", borderRadius: 8, width: 24, height: 34, fontSize: 12, fontWeight: 800, cursor: "pointer", flexShrink: 0, fontFamily: "Inter, sans-serif" };
 const iconBtn = { background: "none", border: "none", cursor: "pointer", color: "#bbb", fontSize: 14, padding: "6px 8px", borderRadius: 6, lineHeight: 1 };
 
 function Card({ children }) { return <div style={{ background: "#fff", borderRadius: 14, padding: 16, border: "1px solid #f0f0f0", overflow: "hidden" }}>{children}</div>; }
